@@ -133,50 +133,86 @@ class LineFollowerEnv(GazeboEnv):
     
     ## HELPER FUNCTIONS
     def process_action(self, action: int):
-        '''
-        @brief Translate the action the robot is taking into a Twist message
-        @param action: an integer where 0 is left, 1 is forward and 2 is right 
-        @retval vel_cmd: Twist message equivalent of the action
-        '''
         vel_cmd = RosTwist()
-
-        # TODO: Impelement process action.
-        
+        if action == 0:      # left
+            vel_cmd.linear.x = 0.2
+            vel_cmd.angular.z = 0.5
+        elif action == 1:    # forward
+            vel_cmd.linear.x = 0.6
+            vel_cmd.angular.z = 0.0
+        elif action == 2:    # right
+            vel_cmd.linear.x = 0.2
+            vel_cmd.angular.z = -0.5
+        else:
+            raise ValueError(f"Invalid action: {action}")
         return vel_cmd
 
 
     def process_reward(self, action, state, terminated):
         '''
         @brief depending on the action, state and terminated values assign
-               a reward
+            a reward
         @retval reward: the reward for the current step
         '''
-        reward = 0
+        # Lost the line: the failure we most want to avoid
+        if terminated or state == -1:
+            return -100.0
 
-        # TODO: Implement process reward.
-        
+        reward = 0.0
+
+        if state == 1:
+            # Line centered: the goal
+            reward += 2.0
+            if action == 1:
+                reward += 1.0     # holding a straight line while centered
+            else:
+                reward -= 0.5     # turning while centered = wobble
+        else:
+            # Line at an edge: drifting, about to lose it
+            reward -= 1.0
+
+            toward = 0 if state == 0 else 2   # line left -> turn left, line right -> turn right
+            away = 2 if state == 0 else 0
+
+            if action == toward:
+                reward += 1.5     # correcting: best option at an edge
+            elif action == away:
+                reward -= 1.0     # making it worse
+
         return reward
 
 
     def process_obs(self, obs: RosImage):
-        '''
-        @brief Identifies the line in the image and populates the state array
-               based on the line position (i.e. state=0 line is left, 
-               state=1 line is in the center)
-        @param obs raw image from Gazebo sim
-        @retval state: the line position as a value: 
-            -1 (no line), 0 (left), 1 (center), 2 (right)
-        @retval terminated: the termination condition occured - the line is no 
-                    longer in the field of the camera
-        '''
-        cv_image = CvBridge().imgmsg_to_cv2(obs, desired_encoding='bgr8')
+        # ROS Image -> numpy array
+        image = np.frombuffer(obs.data, dtype=np.uint8).reshape(
+            obs.height, obs.width, -1)
+        gray = image.mean(axis=2) if image.shape[2] > 1 else image[:, :, 0]
 
-        state = 0
-        terminated = False
+        # Binary mask: dark line on light floor (flip to > 100 if the line is lighter)
+        mask = gray < 100
 
-        # TODO: Implement process observation
+        # Region of interest: bottom part of the image, closest to the robot
+        roi_start = int(obs.height * 0.80)
+        roi = mask[roi_start:, :]
 
-        return state, terminated
+        # No line (or only noise) -> terminate
+        if roi.sum() < 20:
+            return -1, True
+
+        # Centroid: mean x position of all line pixels in the ROI
+        _, xs = np.nonzero(roi)
+        centroid_x = xs.mean()
+
+        # Which third of the image is the centroid in?
+        third = obs.width / 3
+        if centroid_x < third:
+            state = 0          # line left
+        elif centroid_x < 2 * third:
+            state = 1          # line center
+        else:
+            state = 2          # line right
+
+        return state, False
 
 
     # Shutting down ROS2
